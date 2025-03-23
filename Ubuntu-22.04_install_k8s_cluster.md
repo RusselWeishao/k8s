@@ -1,9 +1,8 @@
 集群配置要求：
-一主两从模式，使用kubeadm方式安装。
+一主两从模式，使用kubeadm方式安装
 k8s版本：v1.28.2
     CRI:containerd.io
     CNI:CoreOS Flannel
-Docker版本：Docker 24.0
 
 网络环境：
     master:   11.0.1.21/24
