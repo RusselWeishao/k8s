@@ -18,20 +18,7 @@ k8s版本：v1.28.2
 一、ubuntu安装配置
 1.1 基础配置 
 1.1.1 设置root密码并开启免密切换root
-    $sudo passwd root   ##密码123456
-    $sudo visudo
-    文末添加：
-    hebin ALL=(ALL) NOPASSWD: ALL
-
-    测试免密：
-    sudo -i 
-
-    允许root身份ssh登录
-    #vim /etc/ssh/sshd_config
-    找到 #PermitRootLogin prohibit-password 或 PermitRootLogin no，将其改为：
-    PermitRootLogin yes
-
-    sudo systemctl restart ssh
+ 
 
 关闭apt自动更新
 sudo systemctl stop unattended-upgrades
@@ -94,35 +81,15 @@ root@master:~# sed -n '/swap/s/^/#/gp' /etc/fstab
 root@master:~# sed -i '/swap/s/^/#/' /etc/fstab
 
 1.3 配置sources源，这里使用阿里云源
-#cp /etc/apt/sources.list /etc/apt/sources.list.bak 
-#echo > /etc/apt/sources.list
-#vim /etc/apt/sources.list
-#添加如下内容
-deb https://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
-deb-src https://mirrors.aliyun.com/ubuntu/ jammy main restricted universe multiverse
-
-deb https://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
-deb-src https://mirrors.aliyun.com/ubuntu/ jammy-security main restricted universe multiverse
-
-deb https://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
-deb-src https://mirrors.aliyun.com/ubuntu/ jammy-updates main restricted universe multiverse
-
-# deb https://mirrors.aliyun.com/ubuntu/ jammy-proposed main restricted universe multiverse
-# deb-src https://mirrors.aliyun.com/ubuntu/ jammy-proposed main restricted universe multiverse
-
-deb https://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse
-deb-src https://mirrors.aliyun.com/ubuntu/ jammy-backports main restricted universe multiverse
+直接使用阿里云官方文档即可
 
 # apt upgrade
 # apt update 
 
-1.4 配置阿里云docker-ce源
+1.4 安装必要服务
 1.4.1 配置必要的目录，所有节点
 root@master:~# mkdir -pv /opt/k8s_cluster_install/{yamls,scripts,packages}
-mkdir: created directory '/opt/k8s_cluster_install'
-mkdir: created directory '/opt/k8s_cluster_install/yamls'
-mkdir: created directory '/opt/k8s_cluster_install/scripts'
-mkdir: created directory '/opt/k8s_cluster_install/packages'
+
 
 1.4.2 master节点搭建samba服务器
 安装samba服务
@@ -133,7 +100,7 @@ mkdir: created directory '/opt/k8s_cluster_install/packages'
 #在文件末尾添加以下内容来创建一个共享目录：
 [shared]
    comment = Shared Folder
-   path = /opt/k8s_cluster_install/packages
+   path = /src/to/shared
    browseable = yes
    writable = yes
    read only = no
@@ -141,12 +108,7 @@ mkdir: created directory '/opt/k8s_cluster_install/packages'
    directory mask = 0777
    public = yes
 
-添加用户并对共享目录授权，若用户组不存在则手动创建
-sudo groupadd nobody
-sudo usermod -g nobody nobody
-sudo mkdir -p /srv/samba/shared
-sudo chmod -R 777 /srv/samba/shared
-sudo chown -R nobody:nogroup /opt/k8s_cluster_install/packages
+
 
 设置samba用户
 # smbpasswd -a username
@@ -154,12 +116,7 @@ sudo chown -R nobody:nogroup /opt/k8s_cluster_install/packages
 重启服务
 systemctl restart smbd && systemctl enable smbd
 
-访问方式：
-Windows：打开文件资源管理器，输入\\<Ubuntu的IP地址>\shared
-\\11.0.1.21\shared
 
-Linux：使用smbclient或挂载共享目录：
-smbclient //<Ubuntu的IP地址>/shared -U username
 
 1.5 安装配置containerd.io
 1.5.1 安装containerd.io 
@@ -213,142 +170,9 @@ EOF
 #检查是否正确连接到containerd
 crictl info
 
-1.6 设置代理脚（可选）
-#设置代理
-#apt install -y expect
-#cat set_porxy.sh
-#!/bin/bash
-
-# 定义日志文件
-LOG_FILE="set_proxy_output.log"
-
-# 清空日志文件
-> "$LOG_FILE"
-
-# 定义代理地址
-PROXY_1="192.168.2.11:3213"
-PROXY_2="172.16.38.20:3213"
-
-# 提示用户输入代理地址
-read -p "请输入代理地址（192.168.2.11:3213 或 172.16.38.20:3213）: " proxy_address
-
-# 检查代理地址是否有效
-if [[ "$proxy_address" != "$PROXY_1" && "$proxy_address" != "$PROXY_2" ]]; then
-  echo "错误：代理地址无效！" | tee -a "$LOG_FILE"
-  exit 1
-fi
-
-# 提示用户输入操作（on 或 off）
-read -p "请输入操作（on 开启代理，off 关闭代理）: " operation
-
-# 检查操作是否有效
-if [[ "$operation" != "on" && "$operation" != "off" ]]; then
-  echo "错误：操作无效！" | tee -a "$LOG_FILE"
-  exit 1
-fi
-
-# 根据用户输入设置或取消代理
-if [[ "$operation" == "on" ]]; then
-  # 删除 ~/.bashrc 中已有的代理配置
-  sed -i '/export http_proxy=/d' ~/.bashrc
-  sed -i '/export https_proxy=/d' ~/.bashrc
-
-  # 在 ~/.bashrc 文件末尾添加代理配置
-  echo "export http_proxy=http://$proxy_address" >> ~/.bashrc
-  echo "export https_proxy=http://$proxy_address" >> ~/.bashrc
-
-  echo "代理已永久开启：$proxy_address" | tee -a "$LOG_FILE"
-  echo "请运行以下命令使配置立即生效：" | tee -a "$LOG_FILE"
-  echo "source ~/.bashrc" | tee -a "$LOG_FILE"
-else
-  # 删除 ~/.bashrc 中已有的代理配置
-  sed -i '/export http_proxy=/d' ~/.bashrc
-  sed -i '/export https_proxy=/d' ~/.bashrc
-
-  echo "代理已永久关闭" | tee -a "$LOG_FILE"
-  echo "请运行以下命令使配置立即生效：" | tee -a "$LOG_FILE"
-  echo "source ~/.bashrc" | tee -a "$LOG_FILE"
-fi
-
-# 脚本正常退出
-exit 0
 
 2.0  配置节点免密
-#apt install -y expect ansible 
-#ansible-2.10.8版本使用apt安装不会生成默认配置文件，为避免后续在做节点免密时手动确认密钥的操作，需添加参数
-root@master:/opt/k8s_cluster_install/scripts# ansible --version
-ansible 2.10.8
-  config file = None
-  configured module search path = ['/root/.ansible/plugins/modules', '/usr/share/ansible/plugins/modules']
-  ansible python module location = /usr/lib/python3/dist-packages/ansible
-  executable location = /usr/bin/ansible
-  python version = 3.10.12 (main, Feb  4 2025, 14:57:36) [GCC 11.4.0]
-root@master:/opt/k8s_cluster_install/scripts# vim /etc/ansible/ansible.cfg
-[defaults]
-inventory = /etc/ansible/hosts
-host_key_checking = False
-
-root@master:/opt/k8s_cluster_install/scripts# cat /etc/ansible/hosts 
-[all]
-localhost
-11.0.1.22
-11.0.1.23
-
-[workers]
-11.0.1.22
-11.0.1.23
-
-[local]
-localhost
-
-2.1 编写免密脚本
-#!/bin/bash
-
-# 创建密钥对
-echo "Generating SSH key pair..."
-ssh-keygen -t rsa -P "" -f /root/.ssh/id_rsa -q
-
-# 定义主机列表
-k8s_host_list=("master" "worker-1" "worker-2")
-
-# 从外部文件读取密码
-read -sp "Enter the root password for all nodes: " mypasswd
-echo
-
-# 配置免密登录
-# cat > free_login.sh << EOF
-for i in "${k8s_host_list[@]}"; do
-    echo "Configuring password-free login for $i..."
-    expect -c "
-    set timeout 20
-    spawn ssh-copy-id -i /root/.ssh/id_rsa.pub root@$i
-    expect {
-        \"*yes/no*\" { send \"yes\r\"; exp_continue }
-        \"*password:*\" { send \"$mypasswd\r\"; exp_continue }
-        timeout { puts \"Timeout while waiting for password prompt on $i\"; exit 1 }
-    }
-    "
-    if [ $? -eq 0 ]; then
-        echo "Successfully configured password-free login for $i."
-    else
-        echo "Failed to configure password-free login for $i."
-    fi
-done
-EOF 
-
-# 验证连接
-for i in "${k8s_host_list[@]}"; do
-    echo "Testing connection to $i..."
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 root@$i "echo Connection successful"
-    if [ $? -eq 0 ]; then
-        echo "Connection test passed for $i."
-    else
-        echo "Connection test failed for $i."
-    fi
-done
-
-#chmod +x free_login.sh 
-#./free_login.sh 
+./free_login.sh
 
 2.2 安装chrony服务
 # apt install -y chrony
@@ -368,18 +192,6 @@ allow 11.0.1.0/24
 检查同步时间是否正常
 root@master:~# chronyc sources -v
 
-  .-- Source mode  '^' = server, '=' = peer, '#' = local clock.
- / .- Source state '*' = current best, '+' = combined, '-' = not combined,
-| /             'x' = may be in error, '~' = too variable, '?' = unusable.
-||                                                 .- xxxx [ yyyy ] +/- zzzz
-||      Reachability register (octal) -.           |  xxxx = adjusted offset,
-||      Log2(Polling interval) --.      |          |  yyyy = measured offset,
-||                                \     |          |  zzzz = estimated error.
-||                                 |    |           \
-MS Name/IP address         Stratum Poll Reach LastRx Last sample               
-===============================================================================
-^* 203.107.6.88                  2   6    17    12   -662us[ -525us] +/-   22ms
-^+ 8.149.241.96                  2   6    17    13   +261us[ +398us] +/-   23ms
 
 worker节点： 
 #vim /etc/chrony/chrony.conf
@@ -390,19 +202,6 @@ server 11.0.1.21 iburst
 root@worker-2:~# systemctl daemon-reload 
 root@worker-2:~# systemctl restart chrony
 root@worker-2:~# chronyc sources -v
-
-  .-- Source mode  '^' = server, '=' = peer, '#' = local clock.
- / .- Source state '*' = current best, '+' = combined, '-' = not combined,
-| /             'x' = may be in error, '~' = too variable, '?' = unusable.
-||                                                 .- xxxx [ yyyy ] +/- zzzz
-||      Reachability register (octal) -.           |  xxxx = adjusted offset,
-||      Log2(Polling interval) --.      |          |  yyyy = measured offset,
-||                                \     |          |  zzzz = estimated error.
-||                                 |    |           \
-MS Name/IP address         Stratum Poll Reach LastRx Last sample               
-===============================================================================
-^* master                        3   6    17     3  +3918ns[  +14us] +/-   26ms
-
 
 3.0  安装kubeadm,kubelet,kubectl工具
 配置阿里云源 
@@ -429,25 +228,11 @@ sudo apt-mark hold kubelet kubeadm kubectl
 3.1.1 查看并预拉所需镜像，仅在master节点操作
 查看待拉取镜像信息：
 root@master:/opt/k8s_cluster_install/packages# kubeadm config images list --image-repository=registry.aliyuncs.com/google_containers
-I0320 16:36:43.042012    4798 version.go:256] remote version is much newer: v1.32.3; falling back to: stable-1.28
-registry.aliyuncs.com/google_containers/kube-apiserver:v1.28.15
-registry.aliyuncs.com/google_containers/kube-controller-manager:v1.28.15
-registry.aliyuncs.com/google_containers/kube-scheduler:v1.28.15
-registry.aliyuncs.com/google_containers/kube-proxy:v1.28.15
-registry.aliyuncs.com/google_containers/pause:3.9
-registry.aliyuncs.com/google_containers/etcd:3.5.9-0
-registry.aliyuncs.com/google_containers/coredns:v1.10.1
+
 
 3.1.2 拉取镜像：
 root@master:~# kubeadm config images pull  --image-repository=registry.aliyuncs.com/google_containers
-I0320 11:03:54.532171   43759 version.go:256] remote version is much newer: v1.32.3; falling back to: stable-1.28
-[config/images] Pulled registry.aliyuncs.com/google_containers/kube-apiserver:v1.28.15
-[config/images] Pulled registry.aliyuncs.com/google_containers/kube-controller-manager:v1.28.15
-[config/images] Pulled registry.aliyuncs.com/google_containers/kube-scheduler:v1.28.15
-[config/images] Pulled registry.aliyuncs.com/google_containers/kube-proxy:v1.28.15
-[config/images] Pulled registry.aliyuncs.com/google_containers/pause:3.9
-[config/images] Pulled registry.aliyuncs.com/google_containers/etcd:3.5.9-0
-[config/images] Pulled registry.aliyuncs.com/google_containers/coredns:v1.10.1
+
 
 3.2初始化集群
 sudo kubeadm init \
