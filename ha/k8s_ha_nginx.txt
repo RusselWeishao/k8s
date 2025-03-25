@@ -1,0 +1,234 @@
+使用nginxkeepalived实现k8s master 高可用：
+PS：由于本地集群为一主两从，故此方案未能测试是否成功，仅供参考
+
+方案架构：
+                       +-----------------+
+                       |     VIP:        |
+                       |  11.0.1.100    |
+                       +-------+---------+
+                               |
+       +-----------------------+-----------------------+
+       |                       |                       |
++------+--------+      +-------+-------+      +--------+------+
+| Master1       |      | Master2       |      | Master3       |
+| 11.0.1.21    |      | 11.0.1.22    |      | 11.0.1.23    |
+| +-----------+ |      | +-----------+ |      | +-----------+ |
+| | Keepalived| |      | | Keepalived| |      | | Keepalived| |
+| | (MASTER)  | |      | | (BACKUP)  | |      | | (BACKUP)  | |
+| +-----------+ |      | +-----------+ |      | +-----------+ |
+| +-----------+ |      | +-----------+ |      | +-----------+ |
+| | Nginx     | |      | | Nginx     | |      | | Nginx     | |
+| | LB        | |      | | LB        | |      | | LB        | |
+| +-----------+ |      | +-----------+ |      | +-----------+ |
++---------------+      +---------------+      +---------------+
+       ^                       ^                       ^
+       |                       |                       |
++------+--------+      +-------+-------+      +--------+------+
+| Worker1       |      | Worker2       |      | Worker3       |
+| 11.0.1.24    |      | 11.0.1.25    |      | 11.0.1.26    |
+|               |      |               |      |               |
++---------------+      +---------------+      +---------------+
+
+实施步骤：
+1、所有Master节点安装Nginx和Keepalived
+apt-get update && apt-get install -y nginx keepalived
+
+2、配置nginx反向代理
+user nginx;
+worker_processes auto;
+error_log /var/log/nginx/error.log;
+pid /run/nginx.pid;
+
+events {
+    worker_connections 1024;
+}
+
+stream {
+    upstream k8s_apiserver {
+        server 11.0.1.21:6443;  # Master1
+        server 11.0.1.22:6443;  # Master2
+        server 11.0.1.23:6443;  # Master3
+    }
+
+    server {
+        listen 6443;
+        proxy_pass k8s_apiserver;
+        proxy_timeout 60s;
+        proxy_connect_timeout 2s;
+    }
+}
+
+http {
+    # 可选的健康检查端点
+    server {
+        listen 8080;
+        location /healthz {
+            return 200 "OK";
+        }
+    }
+}
+
+3、配置keepalived
+master-1: /etc/keepalived/keepalived.conf 
+global_defs {                           # 全局参数            
+    router_id LVS_MASTER                # 节点标识，集群内唯一
+}
+
+vrrp_script chk_nginx {
+    # script "/usr/bin/killall -0 nginx"  # 检查nginx进程是否存在，执行killall -0 nginx,并不实际杀死进程
+    script "/etc/keepalived/check_apiserver.sh"     #可使用增强脚本更好的保障VIP切换和健康检查
+    interval 2                          # 每2秒检查一次
+    weight -20                          # 检查失败时优先级降低20
+    fall 2                              # 连续2次检查失败才判定故障
+    rise 2                              # 连续2次检查成功才恢复
+}
+
+vrrp_instance VI_1 {
+    state MASTER                        # 初始状态（MASTER/BACKUP）
+    interface eth0                      # 绑定VIP的网卡
+    virtual_router_id 51                # 虚拟路由ID，集群内所有节点必须相同
+    priority 100                        # 初始优先级（0-255）
+    advert_int 1                        # 主节点同步间隔（秒）
+    authentication {                    # 节点间认证
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        11.0.1.100/24                   # VIP地址
+    }
+    track_script {
+        chk_nginx                       # 关联的健康检查脚本
+    }
+
+    # 增加切换时的通知脚本（可选）
+    notify_master "/etc/keepalived/notify.sh master"
+    notify_backup "/etc/keepalived/notify.sh backup"
+    notify_fault "/etc/keepalived/notify.sh fault"
+}
+
+
+
+
+master-2配置：/etc/keepalived/keepalived.conf 
+global_defs {
+    router_id LVS_MASTER2  # 改为唯一标识
+}
+
+vrrp_script chk_nginx {
+    script "/etc/keepalived/check_apiserver.sh"
+    interval 2
+    weight -20
+    fall 2
+    rise 2
+}
+
+vrrp_instance VI_1 {
+    state BACKUP
+    interface eth0
+    virtual_router_id 51
+    priority 90      # 优先级低于 Master1 (100)，高于 Master3 (80)
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        11.0.1.100/24
+    }
+    track_script {
+        chk_nginx
+    }
+    notify_master "/etc/keepalived/notify.sh master"
+    notify_backup "/etc/keepalived/notify.sh backup"
+    notify_fault "/etc/keepalived/notify.sh fault"
+}
+
+master-3配置： /etc/keepalived/keepalived.conf 
+global_defs {
+    router_id LVS_MASTER3  # 改为唯一标识
+}
+
+vrrp_script chk_nginx {
+    script "/etc/keepalived/check_apiserver.sh"
+    interval 2
+    weight -20
+    fall 2
+    rise 2
+}
+
+vrrp_instance VI_1 {
+    state BACKUP
+    interface eth0
+    virtual_router_id 51
+    priority 80      
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        11.0.1.100/24
+    }
+    track_script {
+        chk_nginx
+    }
+    notify_master "/etc/keepalived/notify.sh master"
+    notify_backup "/etc/keepalived/notify.sh backup"
+    notify_fault "/etc/keepalived/notify.sh fault"
+}
+
+自动切换VIP脚本：/etc/keepalived/check_apiserver.sh 
+#!/bin/bash
+
+# 检查Nginx进程是否存在
+if ! killall -0 nginx &> /dev/null; then
+    exit 1
+fi
+
+# 检查API Server是否健康
+APISERVER="https://localhost:6443"
+if ! curl -s -k -m 2 "$APISERVER/healthz" | grep -q '^ok$'; then
+    exit 1
+fi
+
+exit 0
+
+chmod +x /etc/keepalived/check_apiserver.sh
+
+4、启动nginx、keepalived并设置开机自启
+systemctl enable --now nginx keepalived
+systemctl restart nginx keepalived
+
+5、配置worker节点指向VIP
+修改所有worker节点的kubelet配置：
+#/etc/kubernetes/kubelet.conf
+apiVersion: v1
+clusters:
+- cluster:
+    server: https://11.0.1.100:6443  # 指向VIP
+    certificate-authority-data: <原有CA数据>
+  name: default-cluster
+contexts:
+- context:
+    cluster: default-cluster
+    user: default-auth
+  name: default-context
+current-context: default-context
+
+重启kubelet
+systemctl restart kubelet
+
+6、验证配置
+检查VIP是否在主master上：
+ip addr show eth0 | grep 11.0.1.100
+
+测试APIserver访问：
+curl -k https://11.0.1.100:6443/version
+
+模拟故障转移：
+在主master节点停止nginx:
+systemctl stop nginx
+
+观察VIP是否成功漂移到备份节点并观察集群是否可用
+
+
