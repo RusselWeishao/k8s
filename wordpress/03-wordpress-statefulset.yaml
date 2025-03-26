@@ -1,0 +1,87 @@
+# 03-wordpress-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wordpress
+  namespace: wordpress
+spec:
+  serviceName: wordpress
+  replicas: 1
+  selector:
+    matchLabels:
+    app: wordpress
+  template:
+    metadata:
+      labels:
+      app: wordpress
+  spec:
+    containers:
+    - name: wordpress
+      image: wordpress:php8.1-apache
+      env:
+      - name: WORDPRESS_DB_HOST
+        value: "mysql.wordpress.svc.cluster.local"
+      - name: WORDPRESS_DB_USER
+        valueFrom:
+          secretRef:
+            name: mysql-secret
+            key: MYSQL_USER
+      - name: WORDPRESS_DB_PASSWORD
+        valueFrom:
+          secretRef:
+            name: mysql-secret
+            key: MYSQL_PASSWORD
+      - name: WORDPRESS_DB_NAME
+        valueFrom:
+          secretRef:
+            name: mysql-secret
+            key: WORDPRESS_DATABASE
+      ports:
+      - containerPort: 80
+      volumeMounts:
+      - name: wordpress-data
+        mountPath: /var/www/html
+      livenessProbe:
+        httpGet:
+          path: /wp-login.php
+          port: 80
+        initialDelaySeconds: 60
+        periodSeonds: 10
+        failureThreshold: 3
+      readinessProbe:
+        httpGet:
+          path: /readme.html
+          port: 80
+        initialDelaySeconds: 10
+        perioSeconds: 5
+        timeouSeconds: 2
+      resources:
+        requests:
+          cpu: "200m"
+          memory: "256Mi"
+        limits:
+          cpu: "1000m"
+          memory: "1Gi"
+  volumeClaimTemplates:
+  - metadata:
+      name: wordpress-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 5Gi
+
+---
+# Wordpress service(Cluster IP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress
+  namespace: wordpress
+spec:
+  type: ClusterIP
+  selector:
+    app: wordpress
+  ports:
+  - port: 80
+    targetPort: 80
