@@ -1,0 +1,355 @@
+要求：
+使用k8s集群部署一套单节点架构的nginx+wordpress+mysql应用。
+使用StateFulSet部署wordpress+mysql，使用DeployMent部署nginx
+配置完整的svc服务以供集群外部可使用域名方式访问该站点。
+所有pod都要配置存活探针和就绪探针检查机制（可使用多种方式）
+并且MySQL和wordpress需要加上持久化存储以防数据丢失。
+
+
+---
+
+## **一、架构概述**
+```
+外部访问 -> Nginx (Deployment) -> WordPress (StatefulSet) -> MySQL (StatefulSet)
+                  |                     |
+               (Service)            (Persistent Storage)
+```
+
+---
+
+## **二、完整部署文件**
+
+### **1. 创建 Namespace**
+```yaml
+# 00-namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: wordpress
+```
+
+---
+
+### **2. 配置敏感信息 (Secret)**
+```yaml
+# 01-secrets.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mysql-secret
+  namespace: wordpress
+type: Opaque
+stringData:
+  MYSQL_ROOT_PASSWORD: "rootpass123"
+  MYSQL_DATABASE: "wordpress"
+  MYSQL_USER: "wpuser"
+  MYSQL_PASSWORD: "wppass123"
+  WORDPRESS_DB_PASSWORD: "wppass123"  # WordPress 连接 MySQL 的密码
+```
+
+---
+
+### **3. 部署 MySQL (StatefulSet)**
+```yaml
+# 02-mysql-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mysql
+  namespace: wordpress
+spec:
+  serviceName: mysql
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mysql
+  template:
+    metadata:
+      labels:
+        app: mysql
+    spec:
+      containers:
+      - name: mysql
+        image: mysql:5.7
+        envFrom:
+        - secretRef:
+            name: mysql-secret
+        ports:
+        - containerPort: 3306
+        volumeMounts:
+        - name: mysql-data
+          mountPath: /var/lib/mysql
+        # 存活探针 (3种方式示例)
+        livenessProbe:
+          exec:
+            command: ["mysqladmin", "ping", "-h", "localhost"]
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+        # 就绪探针
+        readinessProbe:
+          tcpSocket:
+            port: 3306
+          initialDelaySeconds: 5
+          periodSeconds: 5
+  volumeClaimTemplates:
+  - metadata:
+      name: mysql-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+# MySQL Service (ClusterIP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: mysql
+  namespace: wordpress
+spec:
+  clusterIP: None  # Headless Service
+  selector:
+    app: mysql
+  ports:
+  - port: 3306
+    targetPort: 3306
+```
+
+---
+
+### **4. 部署 WordPress (StatefulSet)**
+```yaml
+# 03-wordpress-statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: wordpress
+  namespace: wordpress
+spec:
+  serviceName: wordpress
+  replicas: 1
+  selector:
+    matchLabels:
+      app: wordpress
+  template:
+    metadata:
+      labels:
+        app: wordpress
+    spec:
+      containers:
+      - name: wordpress
+        image: wordpress:php8.1-apache
+        env:
+        - name: WORDPRESS_DB_HOST
+          value: "mysql.wordpress.svc.cluster.local"  # 使用DNS名称访问MySQL
+        - name: WORDPRESS_DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_USER
+        - name: WORDPRESS_DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_PASSWORD
+        - name: WORDPRESS_DB_NAME
+          valueFrom:
+            secretKeyRef:
+              name: mysql-secret
+              key: MYSQL_DATABASE
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: wordpress-data
+          mountPath: /var/www/html
+        # 存活探针
+        livenessProbe:
+          httpGet:
+            path: /wp-login.php
+            port: 80
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          failureThreshold: 3
+        # 就绪探针 (3种方式示例)
+        readinessProbe:
+          httpGet:
+            path: /readme.html
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 2
+  volumeClaimTemplates:
+  - metadata:
+      name: wordpress-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 5Gi
+
+---
+# WordPress Service (ClusterIP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: wordpress
+  namespace: wordpress
+spec:
+  selector:
+    app: wordpress
+  ports:
+  - port: 80
+    targetPort: 80
+```
+
+---
+
+### **5. 部署 Nginx (Deployment)**
+```yaml
+# 04-nginx-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx
+  namespace: wordpress
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/conf.d
+        # 存活探针
+        livenessProbe:
+          exec:
+            command: ["nginx", "-t"]
+          initialDelaySeconds: 10
+          periodSeconds: 60
+        # 就绪探针
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-config
+
+---
+# Nginx 配置 (ConfigMap)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: wordpress
+data:
+  default.conf: |
+    server {
+      listen 80;
+      server_name yourdomain.com;  # 替换为实际域名
+      location / {
+        proxy_pass http://wordpress;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+      }
+    }
+
+---
+# Nginx Service (对外暴露)
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx
+  namespace: wordpress
+spec:
+  type: LoadBalancer  # 或 NodePort (根据环境选择)
+  selector:
+    app: nginx
+  ports:
+  - port: 80
+    targetPort: 80
+  externalIPs:  # 可选，指定外部IP
+    - 192.168.1.100
+```
+
+---
+
+## **三、部署流程**
+```bash
+# 1. 创建 Namespace
+kubectl apply -f 00-namespace.yaml
+
+# 2. 部署 Secret
+kubectl apply -f 01-secrets.yaml
+
+# 3. 部署 MySQL
+kubectl apply -f 02-mysql-statefulset.yaml
+
+# 4. 部署 WordPress
+kubectl apply -f 03-wordpress-statefulset.yaml
+
+# 5. 部署 Nginx
+kubectl apply -f 04-nginx-deployment.yaml
+
+# 检查状态
+kubectl get all,pvc -n wordpress
+```
+
+---
+
+## **四、关键配置说明**
+### **1. 健康检查机制**
+| 组件     | 存活探针 (Liveness)                     | 就绪探针 (Readiness)                  |
+|----------|----------------------------------------|---------------------------------------|
+| MySQL    | `mysqladmin ping`                      | TCP 检查 3306 端口                    |
+| WordPress| HTTP GET `/wp-login.php`               | HTTP GET `/readme.html`               |
+| Nginx    | `nginx -t` (检查配置语法)              | HTTP GET `/`                          |
+
+### **2. 持久化存储**
+- **MySQL**: PVC 自动绑定到 `mysql-data-0` (10Gi)
+- **WordPress**: PVC 自动绑定到 `wordpress-data-0` (5Gi)
+
+### **3. 服务暴露**
+- **Nginx Service** 使用 `LoadBalancer` 类型，可通过域名访问
+- 域名解析需指向 LoadBalancer IP 或 NodePort (如 `yourdomain.com` → `192.168.1.100`)
+
+### **4. 数据安全**
+- 所有密码通过 Secret 管理
+- 数据库连接使用 Kubernetes DNS (`mysql.wordpress.svc.cluster.local`)
+
+---
+
+## **五、验证访问**
+1. 获取 Nginx 外部 IP:
+   ```bash
+   kubectl get svc -n wordpress
+   ```
+2. 配置域名解析（如修改本地 hosts）:
+   ```
+   192.168.1.100 yourdomain.com
+   ```
+3. 访问 `http://yourdomain.com` 完成 WordPress 安装
+
+---
+
+此方案满足：
+- 有状态应用使用 StatefulSet + 持久化存储
+- 无状态应用使用 Deployment
+- 完整的健康检查机制
+- 通过域名对外提供服务
+- 数据零丢失风险
